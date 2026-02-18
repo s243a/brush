@@ -39,3 +39,17 @@ pub use platform::terminal;
 pub(crate) use platform::users;
 
 pub use platform::PlatformError;
+
+/// Returns the current system time, using JS Date on WASM where
+/// `std::time::SystemTime::now()` is unsupported.
+#[cfg(target_family = "wasm")]
+pub(crate) fn system_time_now() -> std::time::SystemTime {
+    let millis = js_sys::Date::now() as u64;
+    std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis)
+}
+
+/// Returns the current system time via the standard library.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn system_time_now() -> std::time::SystemTime {
+    std::time::SystemTime::now()
+}

@@ -111,6 +111,11 @@ pub struct BrushShell {
 impl BrushShell {
     /// Create a new shell instance configured for WASM execution.
     pub async fn create() -> Result<BrushShell, JsError> {
+        // Install panic hook for readable WASM stack traces.
+        console_error_panic_hook::set_once();
+
+        web_sys::console::log_1(&"[BrushShell] Starting create()...".into());
+
         let stdout_stream = InMemoryStream::new();
         let stderr_stream = InMemoryStream::new();
 
@@ -119,18 +124,27 @@ impl BrushShell {
         fds.insert(1, OpenFile::Stream(Box::new(stdout_stream.clone())));
         fds.insert(2, OpenFile::Stream(Box::new(stderr_stream.clone())));
 
-        let shell = brush_core::Shell::builder()
+        web_sys::console::log_1(&"[BrushShell] Building shell...".into());
+
+        let builder = brush_core::Shell::builder()
             .interactive(false)
             .profile(ProfileLoadBehavior::Skip)
             .rc(RcLoadBehavior::Skip)
             .do_not_inherit_env(true)
             .skip_well_known_vars(false)
             .command_string_mode(true)
+            .working_dir(std::path::PathBuf::from("/"))
             .fds(fds)
-            .default_builtins(BuiltinSet::BashMode)
+            .default_builtins(BuiltinSet::BashMode);
+
+        web_sys::console::log_1(&"[BrushShell] Builder ready, calling build()...".into());
+
+        let shell = builder
             .build()
             .await
             .map_err(|e| JsError::new(&format!("Failed to create shell: {e}")))?;
+
+        web_sys::console::log_1(&"[BrushShell] Shell built successfully!".into());
 
         Ok(BrushShell {
             state: Arc::new(Mutex::new(ShellState {

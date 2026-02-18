@@ -227,7 +227,7 @@ pub(crate) fn init_well_known_vars(
         "EPOCHREALTIME",
         ShellVariable::new(ShellValue::Dynamic {
             getter: |_shell| {
-                let now = std::time::SystemTime::now();
+                let now = crate::sys::system_time_now();
                 let since_epoch = now
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default();
@@ -242,7 +242,7 @@ pub(crate) fn init_well_known_vars(
         "EPOCHSECONDS",
         ShellVariable::new(ShellValue::Dynamic {
             getter: |_shell| {
-                let now = std::time::SystemTime::now();
+                let now = crate::sys::system_time_now();
                 let since_epoch = now
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default();
@@ -415,7 +415,7 @@ pub(crate) fn init_well_known_vars(
         "SECONDS",
         ShellVariable::new(ShellValue::Dynamic {
             getter: |shell| {
-                let now = std::time::SystemTime::now();
+                let now = crate::sys::system_time_now();
                 let since_last = now
                     .duration_since(shell.last_stopwatch_time())
                     .unwrap_or_default();

@@ -48,7 +48,7 @@ pub(crate) fn start_timing() -> Result<Stopwatch, error::Error> {
 }
 
 fn get_current_stopwatch_time() -> Result<StopwatchTime, error::Error> {
-    let now = std::time::SystemTime::now();
+    let now = crate::sys::system_time_now();
     let (self_user, self_system) = crate::sys::resource::get_self_user_and_system_time()?;
     let (children_user, children_system) =
         crate::sys::resource::get_children_user_and_system_time()?;
