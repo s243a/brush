@@ -263,6 +263,35 @@ impl ShellEnvironment {
         None
     }
 
+    /// Resolve nameref chains: if a variable is marked as a nameref, follow
+    /// the chain to the final target variable name. Returns the original name
+    /// if the variable is not a nameref. Limits chain depth to 8 (like bash).
+    pub(crate) fn resolve_nameref_name(&self, name: &str) -> String {
+        let mut current = name.to_string();
+        for _ in 0..8 {
+            // Raw lookup without nameref resolution
+            let var = self
+                .scopes
+                .iter()
+                .rev()
+                .find_map(|(_, map)| map.get(current.as_str()));
+            match var {
+                Some(v) if v.is_treated_as_nameref() => {
+                    if let ShellValue::String(target) = v.value() {
+                        if target.is_empty() {
+                            break;
+                        }
+                        current = target.clone();
+                    } else {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        current
+    }
+
     /// Tries to retrieve the string value of the variable with the given name in the
     /// environment.
     ///

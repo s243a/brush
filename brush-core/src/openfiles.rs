@@ -92,6 +92,22 @@ pub fn null() -> Result<OpenFile, error::Error> {
     Ok(OpenFile::File(file))
 }
 
+/// Creates a new pipe, returning a (reader, writer) pair of `OpenFile`.
+///
+/// On native platforms, uses `std::io::pipe()`. On WASM, uses an in-memory
+/// pipe implementation since OS pipes are not available.
+pub(crate) fn pipe() -> Result<(OpenFile, OpenFile), std::io::Error> {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let (reader, writer) = std::io::pipe()?;
+        Ok((OpenFile::PipeReader(reader), OpenFile::PipeWriter(writer)))
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        sys::platform::pipes::pipe()
+    }
+}
+
 impl Clone for OpenFile {
     fn clone(&self) -> Self {
         // TODO(unwrap): Need to revisit what we can do here.

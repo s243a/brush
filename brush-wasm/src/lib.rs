@@ -1,3 +1,5 @@
+pub mod wasm_vfs;
+
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
@@ -116,6 +118,14 @@ impl BrushShell {
 
         web_sys::console::log_1(&"[BrushShell] Starting create()...".into());
 
+        // Register SharedVFS hooks for file I/O
+        brush_core::set_wasm_vfs(
+            |path, read, write, create, append| {
+                wasm_vfs::open_file(path, read, write, create, append)
+            },
+            |path| wasm_vfs::exists(path),
+        );
+
         let stdout_stream = InMemoryStream::new();
         let stderr_stream = InMemoryStream::new();
 
@@ -135,7 +145,8 @@ impl BrushShell {
             .command_string_mode(true)
             .working_dir(std::path::PathBuf::from("/"))
             .fds(fds)
-            .default_builtins(BuiltinSet::BashMode);
+            .default_builtins(BuiltinSet::BashMode)
+            .builtins(brush_uutils::uutils_builtins());
 
         web_sys::console::log_1(&"[BrushShell] Builder ready, calling build()...".into());
 

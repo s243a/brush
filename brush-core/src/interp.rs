@@ -443,9 +443,9 @@ async fn spawn_pipeline_processes(
     // command.
     if pipeline_len > 1 {
         for _ in 0..(pipeline_len - 1) {
-            let (reader, writer) = std::io::pipe()?;
-            pipe_readers.push(Some(reader.into()));
-            pipe_writers.push(Some(writer.into()));
+            let (reader, writer) = openfiles::pipe()?;
+            pipe_readers.push(Some(reader));
+            pipe_writers.push(Some(writer));
         }
         // Push `None` to the readers; it will be popped off by the *first* command, which will
         // mean that command gets its stdin from the execution parameters' current stdin.
@@ -1087,15 +1087,58 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
                         &params,
                         kind,
                         subshell_command,
-                    )?;
+                    )
+                    .await?;
 
-                    params
-                        .open_files
-                        .set_fd(installed_fd_num, substitution_file);
+                    // On WASM, /dev/fd/NN doesn't exist. For Read substitutions,
+                    // the writer has already completed so we read the pipe data
+                    // and write it to a temp file in /tmp/ (via SharedVFS) as a
+                    // pseudo file descriptor that commands can open by path.
+                    #[cfg(target_family = "wasm")]
+                    {
+                        if matches!(kind, ast::ProcessSubstitutionKind::Read) {
+                            use std::io::Read as _;
+                            use std::sync::atomic::{AtomicUsize, Ordering};
+                            static PROC_SUB_COUNTER: AtomicUsize = AtomicUsize::new(0);
+                            let id = PROC_SUB_COUNTER.fetch_add(1, Ordering::Relaxed);
+                            let temp_path = std::format!("/tmp/.proc_sub_{id}");
 
-                    args.push(CommandArg::String(std::format!(
-                        "/dev/fd/{installed_fd_num}"
-                    )));
+                            let mut substitution_file = substitution_file;
+                            let mut data = Vec::new();
+                            substitution_file.read_to_end(&mut data)?;
+
+                            let mut options = std::fs::File::options();
+                            options.write(true).create(true).truncate(true);
+                            let mode = crate::shell::fs::FileOpenMode {
+                                read: false,
+                                write: true,
+                                create: true,
+                                append: false,
+                            };
+                            let mut temp_file = context
+                                .shell
+                                .open_file_with_mode(&options, &temp_path, &params, Some(mode))?;
+                            temp_file.write_all(&data)?;
+
+                            args.push(CommandArg::String(temp_path));
+                        } else {
+                            params
+                                .open_files
+                                .set_fd(installed_fd_num, substitution_file);
+                            args.push(CommandArg::String(std::format!(
+                                "/dev/fd/{installed_fd_num}"
+                            )));
+                        }
+                    }
+                    #[cfg(not(target_family = "wasm"))]
+                    {
+                        params
+                            .open_files
+                            .set_fd(installed_fd_num, substitution_file);
+                        args.push(CommandArg::String(std::format!(
+                            "/dev/fd/{installed_fd_num}"
+                        )));
+                    }
                 }
                 CommandPrefixOrSuffixItem::AssignmentWord(assignment, word) => {
                     if args.is_empty() {
@@ -1376,7 +1419,7 @@ async fn apply_assignment(
     // Figure out if we are trying to assign to a variable or assign to an element of an existing
     // array.
     let mut array_index;
-    let variable_name = match &assignment.name {
+    let raw_variable_name = match &assignment.name {
         ast::AssignmentName::VariableName(name) => {
             array_index = None;
             name
@@ -1387,6 +1430,10 @@ async fn apply_assignment(
             name
         }
     };
+
+    // Resolve namerefs: if the variable is a nameref, follow the chain to the target.
+    let resolved = shell.env().resolve_nameref_name(raw_variable_name.as_str());
+    let variable_name = &resolved;
 
     // Expand the values.
     let new_value = match &assignment.value {
@@ -1554,9 +1601,11 @@ pub(crate) async fn setup_redirect(
                         shell.absolute_path(Path::new(expanded_fields.remove(0).as_str()));
 
                     let default_fd_if_unspecified = get_default_fd_for_redirect_kind(kind);
+                    let mut mode = crate::shell::fs::FileOpenMode::default();
                     match kind {
                         ast::IoFileRedirectKind::Read => {
                             options.read(true);
+                            mode.read = true;
                         }
                         ast::IoFileRedirectKind::Write => {
                             if shell
@@ -1576,34 +1625,47 @@ pub(crate) async fn setup_redirect(
                                 options.write(true);
                                 options.truncate(true);
                             }
+                            mode.write = true;
+                            mode.create = true;
                         }
                         ast::IoFileRedirectKind::Append => {
                             options.create(true);
                             options.append(true);
+                            mode.write = true;
+                            mode.create = true;
+                            mode.append = true;
                         }
                         ast::IoFileRedirectKind::ReadAndWrite => {
                             options.create(true);
                             options.read(true);
                             options.write(true);
+                            mode.read = true;
+                            mode.write = true;
+                            mode.create = true;
                         }
                         ast::IoFileRedirectKind::Clobber => {
                             options.create(true);
                             options.write(true);
                             options.truncate(true);
+                            mode.write = true;
+                            mode.create = true;
                         }
                         ast::IoFileRedirectKind::DuplicateInput => {
                             options.read(true);
+                            mode.read = true;
                         }
                         ast::IoFileRedirectKind::DuplicateOutput => {
                             options.create(true);
                             options.write(true);
+                            mode.write = true;
+                            mode.create = true;
                         }
                     }
 
                     let fd_num = specified_fd_num.unwrap_or(default_fd_if_unspecified);
 
                     let opened_file = shell
-                        .open_file(&options, &expanded_file_path, params)
+                        .open_file_with_mode(&options, &expanded_file_path, params, Some(mode))
                         .map_err(|err| {
                             error::ErrorKind::RedirectionFailure(
                                 expanded_file_path.to_string_lossy().to_string(),
@@ -1703,7 +1765,8 @@ pub(crate) async fn setup_redirect(
                                 params,
                                 substitution_kind,
                                 subshell_cmd,
-                            )?;
+                            )
+                            .await?;
 
                             let target_file = substitution_file.try_clone()?;
                             params.open_files.set_fd(substitution_fd, substitution_file);
@@ -1774,8 +1837,14 @@ fn setup_redirect_output_and_error_to(
         .truncate(!append)
         .append(append);
 
+    let mode = crate::shell::fs::FileOpenMode {
+        read: false,
+        write: true,
+        create: true,
+        append,
+    };
     let stdout_file = shell
-        .open_file(&file_options, &abs_file_path, params)
+        .open_file_with_mode(&file_options, &abs_file_path, params, Some(mode))
         .map_err(|err| {
             error::ErrorKind::RedirectionFailure(
                 abs_file_path.to_string_lossy().to_string(),
@@ -1803,13 +1872,12 @@ const fn get_default_fd_for_redirect_kind(kind: &ast::IoFileRedirectKind) -> She
     }
 }
 
-fn setup_process_substitution(
+async fn setup_process_substitution(
     shell: &Shell<impl extensions::ShellExtensions>,
     params: &ExecutionParameters,
     kind: &ast::ProcessSubstitutionKind,
     subshell_cmd: &ast::SubshellCommand,
 ) -> Result<(ShellFd, OpenFile), error::Error> {
-    // TODO(execute): Don't execute synchronously!
     // Execute in a subshell.
     let mut subshell = shell.clone();
 
@@ -1818,8 +1886,7 @@ fn setup_process_substitution(
     child_params.process_group_policy = ProcessGroupPolicy::SameProcessGroup;
 
     // Set up pipe so we can connect to the command.
-    let (reader, writer) = std::io::pipe()?;
-    let (reader, writer) = (reader.into(), writer.into());
+    let (reader, writer) = openfiles::pipe()?;
 
     let target_file = match kind {
         ast::ProcessSubstitutionKind::Read => {
@@ -1832,16 +1899,46 @@ fn setup_process_substitution(
         }
     };
 
-    // Asynchronously spawn off the subshell; we intentionally don't block on its
-    // completion.
     let subshell_cmd = subshell_cmd.to_owned();
-    tokio::spawn(async move {
-        // Intentionally ignore the result of the subshell command.
-        let _ = subshell_cmd
-            .list
-            .execute(&mut subshell, &child_params)
-            .await;
-    });
+
+    // On WASM (single-threaded), sync Read::read() cannot yield to the tokio
+    // runtime. For Read substitutions (< <(cmd)), the writer must complete
+    // before the reader starts so all data is in the pipe buffer.
+    // This mirrors invoke_command_in_subshell_and_get_output() for $(...).
+    // For Write substitutions (>(cmd)), the parent writes first, so we
+    // keep tokio::spawn to run the subshell after the parent finishes.
+    #[cfg(target_family = "wasm")]
+    {
+        match kind {
+            ast::ProcessSubstitutionKind::Read => {
+                // Run writer to completion — pipe buffer is filled, writer dropped (EOF).
+                let _ = subshell_cmd
+                    .list
+                    .execute(&mut subshell, &child_params)
+                    .await;
+            }
+            ast::ProcessSubstitutionKind::Write => {
+                tokio::spawn(async move {
+                    let _ = subshell_cmd
+                        .list
+                        .execute(&mut subshell, &child_params)
+                        .await;
+                });
+            }
+        }
+    }
+
+    // On native platforms with multi-threaded tokio, spawn the writer
+    // asynchronously so it runs concurrently with the reader.
+    #[cfg(not(target_family = "wasm"))]
+    {
+        tokio::spawn(async move {
+            let _ = subshell_cmd
+                .list
+                .execute(&mut subshell, &child_params)
+                .await;
+        });
+    }
 
     // Starting at 63 (a.k.a. 64-1)--and decrementing--look for an
     // available fd.
@@ -1857,21 +1954,21 @@ fn setup_process_substitution(
 }
 
 fn setup_open_file_with_contents(contents: &str) -> Result<OpenFile, error::Error> {
-    let (reader, mut writer) = std::io::pipe()?;
+    let (reader, mut writer) = openfiles::pipe()?;
 
     let bytes = contents.as_bytes();
 
     #[cfg(target_os = "linux")]
     {
-        use std::os::fd::AsFd as _;
+        let fd = reader.try_borrow_as_fd()?;
 
         let len = i32::try_from(bytes.len())
             .map_err(|_err| error::Error::from(error::ErrorKind::TooMuchData))?;
-        nix::fcntl::fcntl(reader.as_fd(), nix::fcntl::FcntlArg::F_SETPIPE_SZ(len))?;
+        nix::fcntl::fcntl(fd, nix::fcntl::FcntlArg::F_SETPIPE_SZ(len))?;
     }
 
     writer.write_all(bytes)?;
     drop(writer);
 
-    Ok(reader.into())
+    Ok(reader)
 }

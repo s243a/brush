@@ -451,13 +451,31 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
     ) -> Result<ExecutionSpawnResult, error::Error> {
         match self.shell {
             ShellForCommand::OwnedShell { target, .. } => {
-                Ok(Self::execute_via_builtin_in_owned_shell(
-                    *target,
-                    self.params,
-                    builtin,
-                    self.command_name,
-                    self.args,
-                ))
+                // On WASM, use .await instead of futures::executor::block_on()
+                // to stay on the tokio runtime and allow other tasks to interleave.
+                #[cfg(target_family = "wasm")]
+                {
+                    Ok(
+                        Self::execute_via_builtin_in_owned_shell_async(
+                            *target,
+                            self.params,
+                            builtin,
+                            self.command_name,
+                            self.args,
+                        )
+                        .await,
+                    )
+                }
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    Ok(Self::execute_via_builtin_in_owned_shell(
+                        *target,
+                        self.params,
+                        builtin,
+                        self.command_name,
+                        self.args,
+                    ))
+                }
             }
             ShellForCommand::ParentShell(..) => {
                 self.execute_via_builtin_in_parent_shell(builtin).await
@@ -465,6 +483,34 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
         }
     }
 
+    /// WASM async variant: executes the builtin directly with .await on the
+    /// tokio runtime instead of using a separate futures::executor. This keeps
+    /// the execution on tokio's task scheduler, allowing spawned tasks (e.g.,
+    /// process substitution writers) to interleave at .await points.
+    #[cfg(target_family = "wasm")]
+    async fn execute_via_builtin_in_owned_shell_async(
+        mut shell: Shell<SE>,
+        params: ExecutionParameters,
+        builtin: builtins::Registration<SE>,
+        command_name: String,
+        args: Vec<CommandArg>,
+    ) -> ExecutionSpawnResult {
+        let cmd_context = ExecutionContext {
+            shell: &mut shell,
+            command_name,
+            params,
+        };
+
+        let result = execute_builtin_command(&builtin, cmd_context, args).await;
+        match result {
+            Ok(r) => ExecutionSpawnResult::Completed(r),
+            Err(_) => ExecutionSpawnResult::Completed(ExecutionResult::new(1)),
+        }
+    }
+
+    /// Native variant: spawns the builtin in a blocking thread so the tokio
+    /// runtime remains free for async I/O and concurrent pipeline stages.
+    #[cfg(not(target_family = "wasm"))]
     fn execute_via_builtin_in_owned_shell(
         mut shell: Shell<SE>,
         params: ExecutionParameters,
@@ -761,32 +807,47 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
     params.process_group_policy = ProcessGroupPolicy::SameProcessGroup;
 
     // Set up pipe so we can read the output.
-    let (reader, writer) = std::io::pipe()?;
-    params.set_fd(OpenFiles::STDOUT_FD, writer.into());
+    let (reader, writer) = openfiles::pipe()?;
+    params.set_fd(OpenFiles::STDOUT_FD, writer);
 
-    // Start the execution of the command, but don't wait for it to
-    // complete. In case the command generates lots of output, we
-    // need to start reading in parallel so the command doesn't block
-    // when the pipe's buffer fills up. We pass ownership of the
-    // subshell and params to run_substitution_command; we must
-    // ensure that they're both dropped by the time this call
-    // returns (so they're not holding onto the write end of the pipe).
-    let cmd_join_handle = tokio::task::spawn_blocking(move || {
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(run_substitution_command(subshell, params, s))
-    });
+    // On WASM, run the command to completion first, then read from the pipe.
+    // There's no OS thread pool for spawn_blocking, and our in-memory pipe
+    // buffers all data so sequential execution works correctly.
+    #[cfg(target_family = "wasm")]
+    {
+        let run_result = run_substitution_command(subshell, params, s).await;
+        let cmd_result = run_result?;
 
-    // Extract output.
-    let output_str = std::io::read_to_string(reader)?;
+        // Extract output — all data is now in the pipe, writer is dropped.
+        let output_str = std::io::read_to_string(reader)?;
 
-    // Now observe the command's completion.
-    let run_result = cmd_join_handle.await?;
-    let cmd_result = run_result?;
+        // Store the status.
+        shell.set_last_exit_status(cmd_result.exit_code.into());
 
-    // Store the status.
-    shell.set_last_exit_status(cmd_result.exit_code.into());
+        Ok(output_str)
+    }
 
-    Ok(output_str)
+    // On native platforms, run the command in a blocking thread so we can
+    // read output in parallel (prevents pipe buffer from filling up).
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let cmd_join_handle = tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(run_substitution_command(subshell, params, s))
+        });
+
+        // Extract output.
+        let output_str = std::io::read_to_string(reader)?;
+
+        // Now observe the command's completion.
+        let run_result = cmd_join_handle.await?;
+        let cmd_result = run_result?;
+
+        // Store the status.
+        shell.set_last_exit_status(cmd_result.exit_code.into());
+
+        Ok(output_str)
+    }
 }
 
 async fn run_substitution_command(

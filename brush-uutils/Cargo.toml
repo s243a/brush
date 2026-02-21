@@ -1,0 +1,31 @@
+[package]
+name = "brush-uutils"
+description = "Bridge crate: uutils/coreutils commands as brush builtins"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+brush-core = { path = "../brush-core", default-features = false }
+uucore = { path = "../../coreutils/src/uucore", default-features = false }
+
+# Tier 1 utilities (UnifyWeaver essentials + common text processing)
+uu_cat = { path = "../../coreutils/src/uu/cat", default-features = false }
+uu_echo = { path = "../../coreutils/src/uu/echo" }
+uu_sort = { path = "../../coreutils/src/uu/sort", default-features = false }
+uu_uniq = { path = "../../coreutils/src/uu/uniq" }
+uu_wc = { path = "../../coreutils/src/uu/wc" }
+uu_head = { path = "../../coreutils/src/uu/head" }
+uu_tail = { path = "../../coreutils/src/uu/tail", default-features = false }
+uu_cut = { path = "../../coreutils/src/uu/cut" }
+uu_tr = { path = "../../coreutils/src/uu/tr" }
+uu_seq = { path = "../../coreutils/src/uu/seq" }
+uu_printf = { path = "../../coreutils/src/uu/printf" }
+
+# grep-wasm (ripgrep library-based POSIX grep)
+grep-wasm = { path = "../../grep-wasm" }
+
+[lints]
+workspace = true

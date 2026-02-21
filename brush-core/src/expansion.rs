@@ -1624,7 +1624,9 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
             brush_parser::word::Parameter::Named(n) => {
                 if !env::valid_variable_name(n.as_str()) {
                     Err(error::ErrorKind::BadSubstitution(n.clone()).into())
-                } else if let Some((_, var)) = self.shell.env().get(n) {
+                } else {
+                let resolved = self.shell.env().resolve_nameref_name(n.as_str());
+                if let Some((_, var)) = self.shell.env().get(&resolved) {
                     if matches!(var.value(), ShellValue::Unset(_)) {
                         self.undefined_expansion(parameter, allow_unset_vars)
                     } else {
@@ -1638,10 +1640,14 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
                 } else {
                     self.undefined_expansion(parameter, allow_unset_vars)
                 }
+                }
             }
             brush_parser::word::Parameter::NamedWithIndex { name, index } => {
+                // Resolve namerefs for the variable name.
+                let resolved_name = self.shell.env().resolve_nameref_name(name.as_str());
+
                 // First check to see if it's an associative array.
-                let is_set_assoc_array = if let Some((_, var)) = self.shell.env().get(name) {
+                let is_set_assoc_array = if let Some((_, var)) = self.shell.env().get(&resolved_name) {
                     matches!(
                         var.value(),
                         ShellValue::AssociativeArray(_)
@@ -1657,7 +1663,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
                     .await?;
 
                 // Index into the array.
-                if let Some((_, var)) = self.shell.env().get(name)
+                if let Some((_, var)) = self.shell.env().get(&resolved_name)
                     && let Ok(Some(value)) = var.value().get_at(index_to_use.as_str(), self.shell)
                 {
                     Ok(Expansion::from(value.to_string()))
@@ -1666,7 +1672,8 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
                 }
             }
             brush_parser::word::Parameter::NamedWithAllIndices { name, concatenate } => {
-                if let Some((_, var)) = self.shell.env().get(name) {
+                let resolved_name = self.shell.env().resolve_nameref_name(name.as_str());
+                if let Some((_, var)) = self.shell.env().get(&resolved_name) {
                     let values = var.value().element_values(self.shell);
 
                     Ok(Expansion {
