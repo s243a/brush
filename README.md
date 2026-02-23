@@ -49,6 +49,20 @@
 
 > ⚠️ **Not everything works yet:** `coproc`, `select`, ERR traps, and some edge cases aren't supported. See the [Compatibility Reference](docs/reference/compatibility.md) for details.
 
+## Fork: WASM Builtins for SciREPL
+
+This fork extends brush with additional builtins and VFS (Virtual File System) integration for [SciREPL](https://github.com/s243a/SciREPL), a browser-based scientific notebook that uses brush-wasm as its bash kernel.
+
+Key additions:
+
+- **uutils/coreutils builtins** — `cat`, `sort`, `uniq`, `wc`, `head`, `tail`, `cut`, `tr`, `seq`, `printf` via [uutils/coreutils](https://github.com/uutils/coreutils)
+- **Custom builtins** — `ls` (with `-l`, `-a`, `-1`, `-h` flags) and `tee`, implemented directly against the browser VFS
+- **grep** — POSIX-compatible `grep` via [grep-wasm](https://github.com/nickg/grep-wasm) (ripgrep library-based)
+- **find** — Full `find` command via a [WASM-patched fork of findutils](https://github.com/s243a/findutils), supporting `-name`, `-type`, `-maxdepth`, `-iname`, `-not`, `-or`, `-print0`, and more
+- **VFS extended callbacks** — `wasm_list_dir`, `wasm_stat`, `wasm_remove` in `brush-core` allow builtins to query the browser's SharedVFS for directory listings, file metadata, and deletion
+
+All additions are gated behind `cfg(target_family = "wasm")` — native brush builds are unaffected.
+
 ### Quick start:
 
 ```console
