@@ -27,5 +27,8 @@ uu_printf = { path = "../../coreutils/src/uu/printf" }
 # grep-wasm (ripgrep library-based POSIX grep)
 grep-wasm = { path = "../../grep-wasm" }
 
+# findutils (find command)
+findutils = { path = "../../findutils" }
+
 [lints]
 workspace = true

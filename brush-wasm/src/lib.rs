@@ -126,6 +126,14 @@ impl BrushShell {
             |path| wasm_vfs::exists(path),
         );
 
+        // Register extended VFS hooks for directory listing, remove, stat, mkdir
+        brush_core::set_wasm_vfs_extended(
+            |path| wasm_vfs::list_dir(path),
+            |path| wasm_vfs::remove(path),
+            |path| wasm_vfs::stat(path),
+            |path| wasm_vfs::mkdir(path),
+        );
+
         let stdout_stream = InMemoryStream::new();
         let stderr_stream = InMemoryStream::new();
 

@@ -37,6 +37,15 @@ extern "C" {
 
     #[wasm_bindgen(js_namespace = ["window", "sharedVFS"], js_name = "vfs_append_chunk")]
     fn js_vfs_append_chunk(path: &str, chunk: &[u8]);
+
+    #[wasm_bindgen(js_namespace = ["window", "sharedVFS"], js_name = "vfs_list_dir")]
+    fn js_vfs_list_dir(path: &str) -> JsValue;
+
+    #[wasm_bindgen(js_namespace = ["window", "sharedVFS"], js_name = "vfs_remove")]
+    fn js_vfs_remove(path: &str) -> bool;
+
+    #[wasm_bindgen(js_namespace = ["window", "sharedVFS"], js_name = "vfs_stat")]
+    fn js_vfs_stat(path: &str) -> JsValue;
 }
 
 // ── Helper: convert JsValue (Uint8Array or null) to Option<Vec<u8>> ──
@@ -277,4 +286,47 @@ pub fn exists(path: &Path) -> bool {
 /// Create a directory in SharedVFS.
 pub fn mkdir(path: &Path) {
     js_vfs_mkdir(&path.to_string_lossy());
+}
+
+/// List directory contents from SharedVFS.
+/// Returns Vec of (name, size, is_dir, modified_ms) tuples.
+pub fn list_dir(path: &Path) -> Option<Vec<(String, u64, bool, u64)>> {
+    let val = js_vfs_list_dir(&path.to_string_lossy());
+    if val.is_null() || val.is_undefined() {
+        return None;
+    }
+    let json_str: String = val.as_string()?;
+    // Parse JSON: [{name, size, is_dir, modified}, ...]
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).ok()?;
+    let entries = parsed
+        .into_iter()
+        .filter_map(|obj| {
+            let name = obj.get("name")?.as_str()?.to_string();
+            let size = obj.get("size")?.as_u64().unwrap_or(0);
+            let is_dir = obj.get("is_dir")?.as_bool().unwrap_or(false);
+            let modified = obj.get("modified")?.as_u64().unwrap_or(0);
+            Some((name, size, is_dir, modified))
+        })
+        .collect();
+    Some(entries)
+}
+
+/// Remove a file or empty directory from SharedVFS.
+pub fn remove(path: &Path) -> bool {
+    js_vfs_remove(&path.to_string_lossy())
+}
+
+/// Get file/directory stat from SharedVFS.
+/// Returns (size, is_dir, modified_ms) or None.
+pub fn stat(path: &Path) -> Option<(u64, bool, u64)> {
+    let val = js_vfs_stat(&path.to_string_lossy());
+    if val.is_null() || val.is_undefined() {
+        return None;
+    }
+    let json_str: String = val.as_string()?;
+    let obj: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+    let size = obj.get("size")?.as_u64().unwrap_or(0);
+    let is_dir = obj.get("is_dir")?.as_bool().unwrap_or(false);
+    let modified = obj.get("modified")?.as_u64().unwrap_or(0);
+    Some((size, is_dir, modified))
 }

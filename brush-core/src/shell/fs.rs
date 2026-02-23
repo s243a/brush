@@ -24,12 +24,34 @@ type VfsOpenFn = Box<dyn Fn(&Path, bool, bool, bool, bool) -> Result<openfiles::
 #[cfg(target_family = "wasm")]
 type VfsExistsFn = Box<dyn Fn(&Path) -> bool>;
 
+/// VFS directory entry: (name, size, is_dir, modified_ms)
+#[cfg(target_family = "wasm")]
+type VfsListDirFn = Box<dyn Fn(&Path) -> Option<Vec<(String, u64, bool, u64)>>>;
+
+#[cfg(target_family = "wasm")]
+type VfsRemoveFn = Box<dyn Fn(&Path) -> bool>;
+
+/// VFS stat result: (size, is_dir, modified_ms)
+#[cfg(target_family = "wasm")]
+type VfsStatFn = Box<dyn Fn(&Path) -> Option<(u64, bool, u64)>>;
+
+#[cfg(target_family = "wasm")]
+type VfsMkdirFn = Box<dyn Fn(&Path)>;
+
 #[cfg(target_family = "wasm")]
 thread_local! {
     /// VFS open callback: (path, read, write, create, append) -> Result<OpenFile>
     static VFS_OPEN: std::cell::RefCell<Option<VfsOpenFn>> = const { std::cell::RefCell::new(None) };
     /// VFS exists callback: (path) -> bool
     static VFS_EXISTS: std::cell::RefCell<Option<VfsExistsFn>> = const { std::cell::RefCell::new(None) };
+    /// VFS list_dir callback: (path) -> Option<Vec<(name, size, is_dir, modified_ms)>>
+    static VFS_LIST_DIR: std::cell::RefCell<Option<VfsListDirFn>> = const { std::cell::RefCell::new(None) };
+    /// VFS remove callback: (path) -> bool
+    static VFS_REMOVE: std::cell::RefCell<Option<VfsRemoveFn>> = const { std::cell::RefCell::new(None) };
+    /// VFS stat callback: (path) -> Option<(size, is_dir, modified_ms)>
+    static VFS_STAT: std::cell::RefCell<Option<VfsStatFn>> = const { std::cell::RefCell::new(None) };
+    /// VFS mkdir callback: (path)
+    static VFS_MKDIR: std::cell::RefCell<Option<VfsMkdirFn>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Register VFS callbacks. Called by brush-wasm during init.
@@ -41,6 +63,21 @@ pub fn set_wasm_vfs(
 ) {
     VFS_OPEN.with(|cell| *cell.borrow_mut() = Some(Box::new(open_fn)));
     VFS_EXISTS.with(|cell| *cell.borrow_mut() = Some(Box::new(exists_fn)));
+}
+
+/// Register extended VFS callbacks for directory listing, remove, stat, mkdir.
+#[cfg(target_family = "wasm")]
+#[allow(dead_code)]
+pub fn set_wasm_vfs_extended(
+    list_dir_fn: impl Fn(&Path) -> Option<Vec<(String, u64, bool, u64)>> + 'static,
+    remove_fn: impl Fn(&Path) -> bool + 'static,
+    stat_fn: impl Fn(&Path) -> Option<(u64, bool, u64)> + 'static,
+    mkdir_fn: impl Fn(&Path) + 'static,
+) {
+    VFS_LIST_DIR.with(|cell| *cell.borrow_mut() = Some(Box::new(list_dir_fn)));
+    VFS_REMOVE.with(|cell| *cell.borrow_mut() = Some(Box::new(remove_fn)));
+    VFS_STAT.with(|cell| *cell.borrow_mut() = Some(Box::new(stat_fn)));
+    VFS_MKDIR.with(|cell| *cell.borrow_mut() = Some(Box::new(mkdir_fn)));
 }
 
 /// Open a file for reading via the VFS. Returns `Box<dyn Read>` for use
@@ -72,6 +109,84 @@ pub fn wasm_file_exists(path: &Path) -> bool {
             exists_fn(path)
         } else {
             false
+        }
+    })
+}
+
+/// List directory contents via the VFS. Returns Vec of (name, size, is_dir, modified_ms).
+#[cfg(target_family = "wasm")]
+#[allow(dead_code)]
+pub fn wasm_list_dir(path: &Path) -> Option<Vec<(String, u64, bool, u64)>> {
+    VFS_LIST_DIR.with(|cell| {
+        let borrow = cell.borrow();
+        if let Some(ref list_fn) = *borrow {
+            list_fn(path)
+        } else {
+            None
+        }
+    })
+}
+
+/// Remove a file or empty directory via the VFS.
+#[cfg(target_family = "wasm")]
+#[allow(dead_code)]
+pub fn wasm_remove(path: &Path) -> bool {
+    VFS_REMOVE.with(|cell| {
+        let borrow = cell.borrow();
+        if let Some(ref rm_fn) = *borrow {
+            rm_fn(path)
+        } else {
+            false
+        }
+    })
+}
+
+/// Get file/directory stat via the VFS. Returns (size, is_dir, modified_ms).
+#[cfg(target_family = "wasm")]
+#[allow(dead_code)]
+pub fn wasm_stat(path: &Path) -> Option<(u64, bool, u64)> {
+    VFS_STAT.with(|cell| {
+        let borrow = cell.borrow();
+        if let Some(ref stat_fn) = *borrow {
+            stat_fn(path)
+        } else {
+            None
+        }
+    })
+}
+
+/// Create a directory via the VFS.
+#[cfg(target_family = "wasm")]
+#[allow(dead_code)]
+pub fn wasm_mkdir(path: &Path) {
+    VFS_MKDIR.with(|cell| {
+        let borrow = cell.borrow();
+        if let Some(ref mkdir_fn) = *borrow {
+            mkdir_fn(path);
+        }
+    })
+}
+
+/// Open a file via the VFS with explicit mode flags.
+/// Returns an OpenFile that can be written to.
+#[cfg(target_family = "wasm")]
+#[allow(dead_code)]
+pub fn wasm_open_file(
+    path: &Path,
+    read: bool,
+    write: bool,
+    create: bool,
+    append: bool,
+) -> std::io::Result<openfiles::OpenFile> {
+    VFS_OPEN.with(|cell| {
+        let borrow = cell.borrow();
+        if let Some(ref open_fn) = *borrow {
+            open_fn(path, read, write, create, append)
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no VFS registered",
+            ))
         }
     })
 }

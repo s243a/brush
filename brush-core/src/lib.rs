@@ -65,4 +65,7 @@ pub use variables::{ShellValue, ShellVariable};
 
 // Re-export WASM VFS registration for brush-wasm
 #[cfg(target_family = "wasm")]
-pub use shell::fs::{set_wasm_vfs, wasm_file_exists, wasm_open_file_for_read, FileOpenMode};
+pub use shell::fs::{
+    set_wasm_vfs, set_wasm_vfs_extended, wasm_file_exists, wasm_list_dir, wasm_mkdir,
+    wasm_open_file, wasm_open_file_for_read, wasm_remove, wasm_stat, FileOpenMode,
+};
