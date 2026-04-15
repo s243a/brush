@@ -1072,7 +1072,16 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
         // if expansion (e.g., command substitution) set an exit status.
         let status_change_count_before_expansion = context.shell.last_exit_status_change_count();
 
-        for item in prefix_iter.chain(cmd_name_items.iter()).chain(suffix_iter) {
+        // On WASM, Write process substitutions (>(cmd)) can't use the normal
+        // tokio::spawn approach because the single-threaded runtime deadlocks
+        // if the parent (e.g. `tee`) writes synchronously without yielding.
+        // Instead, we redirect the parent's writes to a temp file, then run
+        // each subshell sequentially after the parent command completes.
+        #[cfg(target_family = "wasm")]
+        let mut pending_wasm_write_subs: Vec<(ast::SubshellCommand, String)> = Vec::new();
+
+        #[allow(unused_labels)]
+        'args_loop: for item in prefix_iter.chain(cmd_name_items.iter()).chain(suffix_iter) {
             match item {
                 CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
                     if let Err(e) = setup_redirect(&mut context.shell, &mut params, redirect).await
@@ -1082,6 +1091,50 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
                     }
                 }
                 CommandPrefixOrSuffixItem::ProcessSubstitution(kind, subshell_command) => {
+                    // WASM + Write: use temp file + deferred subshell execution.
+                    // Skip the normal setup_process_substitution call (which spawns).
+                    //
+                    // Strategy: instead of passing /dev/fd/NN to the parent
+                    // command (which many builtins like tee bypass on WASM via
+                    // wasm_open_file, skipping the fd resolver), pass the real
+                    // temp file path. The parent opens the temp file directly
+                    // through the JS VFS and writes to it. After the parent
+                    // finishes, we read the temp file and feed it as stdin to
+                    // the subshell.
+                    #[cfg(target_family = "wasm")]
+                    if matches!(kind, ast::ProcessSubstitutionKind::Write) {
+                        use std::sync::atomic::{AtomicUsize, Ordering};
+                        static PROC_SUB_WRITE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+                        let id = PROC_SUB_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+                        let temp_path = std::format!("/tmp/.proc_sub_write_{id}");
+
+                        // Create the temp file (empty). Dropping the OpenFile
+                        // flushes an empty buffer, ensuring the file exists
+                        // for the parent to open via wasm_open_file.
+                        {
+                            let mut options = std::fs::File::options();
+                            options.write(true).create(true).truncate(true);
+                            let mode = crate::shell::fs::FileOpenMode {
+                                read: false,
+                                write: true,
+                                create: true,
+                                append: false,
+                            };
+                            let _ = context.shell.open_file_with_mode(
+                                &options,
+                                &temp_path,
+                                &params,
+                                Some(mode),
+                            )?;
+                        }
+
+                        args.push(CommandArg::String(temp_path.clone()));
+
+                        pending_wasm_write_subs
+                            .push((subshell_command.clone(), temp_path));
+                        continue 'args_loop;
+                    }
+
                     let (installed_fd_num, substitution_file) = setup_process_substitution(
                         &context.shell,
                         &params,
@@ -1225,6 +1278,22 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
                 commands::ShellForCommand::OwnedShell { target, parent } => (Some(target), parent),
             };
 
+            // Clone the shell before it's moved into execute_command so we can
+            // run deferred WASM Write process substitutions after the command
+            // finishes. Only cloned when actually needed.
+            #[cfg(target_family = "wasm")]
+            let drain_shell = if pending_wasm_write_subs.is_empty() {
+                None
+            } else {
+                Some((&*parent_shell).clone())
+            };
+            #[cfg(target_family = "wasm")]
+            let drain_params = if pending_wasm_write_subs.is_empty() {
+                None
+            } else {
+                Some(params.clone())
+            };
+
             let shell = if let Some(owned_shell) = owned_shell {
                 commands::ShellForCommand::OwnedShell {
                     target: owned_shell,
@@ -1239,7 +1308,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
                 process_group_id: context.process_group_id,
             };
 
-            match execute_command(context, params, cmd_name, assignments, args).await {
+            let cmd_result = match execute_command(context, params, cmd_name, assignments, args).await {
                 Ok(result) => Ok(result),
                 Err(err) => {
                     let _ = parent_shell.display_error(&mut stderr, &err);
@@ -1247,7 +1316,47 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
                     let result = err.into_result(parent_shell);
                     Ok(result.into())
                 }
+            };
+
+            // Drain WASM Write process substitutions now that the parent has finished.
+            #[cfg(target_family = "wasm")]
+            if let (Some(drain_shell), Some(drain_params)) = (drain_shell, drain_params) {
+                for (subshell_cmd, temp_path) in pending_wasm_write_subs {
+                    use std::fs::File;
+                    let mut read_options = File::options();
+                    read_options.read(true);
+                    let mode = crate::shell::fs::FileOpenMode {
+                        read: true,
+                        write: false,
+                        create: false,
+                        append: false,
+                    };
+                    let temp_read = match drain_shell.open_file_with_mode(
+                        &read_options,
+                        &temp_path,
+                        &drain_params,
+                        Some(mode),
+                    ) {
+                        Ok(f) => f,
+                        Err(_) => continue, // Best effort; skip on error.
+                    };
+
+                    let mut subshell = drain_shell.clone();
+                    subshell.options_mut().interactive = false;
+                    let mut child_params = drain_params.clone();
+                    child_params.process_group_policy = ProcessGroupPolicy::SameProcessGroup;
+                    child_params
+                        .open_files
+                        .set_fd(OpenFiles::STDIN_FD, temp_read);
+
+                    let _ = subshell_cmd
+                        .list
+                        .execute(&mut subshell, &child_params)
+                        .await;
+                }
             }
+
+            cmd_result
         } else {
             // No command to run; assignments must be applied to this shell.
             for assignment in assignments {
@@ -1905,8 +2014,12 @@ async fn setup_process_substitution(
     // runtime. For Read substitutions (< <(cmd)), the writer must complete
     // before the reader starts so all data is in the pipe buffer.
     // This mirrors invoke_command_in_subshell_and_get_output() for $(...).
-    // For Write substitutions (>(cmd)), the parent writes first, so we
-    // keep tokio::spawn to run the subshell after the parent finishes.
+    // For Write substitutions (>(cmd)), tokio::spawn does not work reliably
+    // on the single-threaded WASM runtime: if the parent (e.g. `tee`) writes
+    // synchronously without yielding, the spawned subshell never gets polled
+    // and the shell hangs. The call site (execute_in_pipeline) special-cases
+    // Write on WASM to use a temp-file + deferred execution approach and does
+    // not invoke this function for that case.
     #[cfg(target_family = "wasm")]
     {
         match kind {
@@ -1918,6 +2031,9 @@ async fn setup_process_substitution(
                     .await;
             }
             ast::ProcessSubstitutionKind::Write => {
+                // Should not be reached: callers on WASM handle Write substitution
+                // via temp-file + deferred execution before calling this function.
+                // If we do reach here, fall back to the spawn-and-hope approach.
                 tokio::spawn(async move {
                     let _ = subshell_cmd
                         .list
