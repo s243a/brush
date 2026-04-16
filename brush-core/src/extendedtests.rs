@@ -79,7 +79,20 @@ pub(crate) fn apply_unary_predicate_to_str(
         ast::UnaryPredicate::StringHasZeroLength => Ok(operand.is_empty()),
         ast::UnaryPredicate::FileExists => {
             let path = shell.absolute_path(Path::new(operand));
-            Ok(path.exists())
+            #[cfg(target_family = "wasm")]
+            {
+                // On WASM, std::path::Path methods hit the real filesystem
+                // which doesn't include the JS-backed VFS. Check via the VFS
+                // first, then fall back to the real filesystem.
+                if crate::shell::fs::wasm_file_exists(&path) {
+                    return Ok(true);
+                }
+                Ok(path.exists())
+            }
+            #[cfg(not(target_family = "wasm"))]
+            {
+                Ok(path.exists())
+            }
         }
         ast::UnaryPredicate::FileExistsAndIsBlockSpecialFile => {
             let path = shell.absolute_path(Path::new(operand));
@@ -91,11 +104,31 @@ pub(crate) fn apply_unary_predicate_to_str(
         }
         ast::UnaryPredicate::FileExistsAndIsDir => {
             let path = shell.absolute_path(Path::new(operand));
-            Ok(path.is_dir())
+            #[cfg(target_family = "wasm")]
+            {
+                if let Some((_, is_dir, _)) = crate::shell::fs::wasm_stat(&path) {
+                    return Ok(is_dir);
+                }
+                Ok(path.is_dir())
+            }
+            #[cfg(not(target_family = "wasm"))]
+            {
+                Ok(path.is_dir())
+            }
         }
         ast::UnaryPredicate::FileExistsAndIsRegularFile => {
             let path = shell.absolute_path(Path::new(operand));
-            Ok(path.is_file())
+            #[cfg(target_family = "wasm")]
+            {
+                if let Some((_, is_dir, _)) = crate::shell::fs::wasm_stat(&path) {
+                    return Ok(!is_dir);
+                }
+                Ok(path.is_file())
+            }
+            #[cfg(not(target_family = "wasm"))]
+            {
+                Ok(path.is_file())
+            }
         }
         ast::UnaryPredicate::FileExistsAndIsSetgid => {
             let path = shell.absolute_path(Path::new(operand));
@@ -115,14 +148,38 @@ pub(crate) fn apply_unary_predicate_to_str(
         }
         ast::UnaryPredicate::FileExistsAndIsReadable => {
             let path = shell.absolute_path(Path::new(operand));
-            Ok(path.readable())
+            #[cfg(target_family = "wasm")]
+            {
+                // On WASM, a VFS file is always readable if it exists.
+                if crate::shell::fs::wasm_file_exists(&path) {
+                    return Ok(true);
+                }
+                Ok(path.readable())
+            }
+            #[cfg(not(target_family = "wasm"))]
+            {
+                Ok(path.readable())
+            }
         }
         ast::UnaryPredicate::FileExistsAndIsNotZeroLength => {
             let path = shell.absolute_path(Path::new(operand));
-            if let Ok(metadata) = path.metadata() {
-                Ok(metadata.len() > 0)
-            } else {
+            #[cfg(target_family = "wasm")]
+            {
+                if let Some((size, _is_dir, _)) = crate::shell::fs::wasm_stat(&path) {
+                    return Ok(size > 0);
+                }
+                if let Ok(metadata) = path.metadata() {
+                    return Ok(metadata.len() > 0);
+                }
                 Ok(false)
+            }
+            #[cfg(not(target_family = "wasm"))]
+            {
+                if let Ok(metadata) = path.metadata() {
+                    Ok(metadata.len() > 0)
+                } else {
+                    Ok(false)
+                }
             }
         }
         ast::UnaryPredicate::FdIsOpenTerminal => {

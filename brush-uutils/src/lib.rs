@@ -213,6 +213,26 @@ impl SimpleCommand for LsBuiltin {
                     if !long_format && !one_per_line {
                         let _ = writeln!(stdout);
                     }
+                } else if let Some((size, is_dir, _modified)) = brush_core::wasm_stat(&path) {
+                    // Not a directory listing — single file (or directory without contents).
+                    // Treat as a one-entry listing by its display name.
+                    let name = std::path::Path::new(path_str)
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path_str.clone());
+                    if long_format {
+                        let type_char = if is_dir { 'd' } else { '-' };
+                        let size_str = if human_sizes {
+                            human_readable_size(size)
+                        } else {
+                            format!("{size:>8}")
+                        };
+                        let _ = writeln!(stdout, "{type_char}rw-r--r-- 1 user user {size_str} {name}");
+                    } else if one_per_line {
+                        let _ = writeln!(stdout, "{name}");
+                    } else {
+                        let _ = writeln!(stdout, "{name}");
+                    }
                 } else {
                     let _ = writeln!(stderr, "ls: cannot access '{path_str}': No such file or directory");
                     return Ok(results::ExecutionResult::new(2));
