@@ -444,6 +444,91 @@ impl SimpleCommand for RmBuiltin {
     }
 }
 
+/// `mv` — move (rename) files.
+pub struct MvBuiltin;
+
+impl SimpleCommand for MvBuiltin {
+    fn get_content(
+        name: &str,
+        _content_type: ContentType,
+        _options: &ContentOptions,
+    ) -> Result<String, error::Error> {
+        Ok(format!("{name}: move (rename) files\n"))
+    }
+
+    fn execute<SE: extensions::ShellExtensions, I: Iterator<Item = S>, S: AsRef<str>>(
+        context: commands::ExecutionContext<'_, SE>,
+        args: I,
+    ) -> Result<results::ExecutionResult, error::Error> {
+        let args: Vec<String> = args.map(|a| a.as_ref().to_string()).collect();
+        let mut stderr = context.stderr();
+        let mut positional: Vec<String> = Vec::new();
+
+        for arg in args.iter().skip(1) {
+            if arg.starts_with('-') && arg.len() > 1 {
+                // Ignore flags like -f, -n, -v for now
+            } else {
+                positional.push(arg.clone());
+            }
+        }
+
+        if positional.len() != 2 {
+            let _ = writeln!(stderr, "mv: expected 2 arguments, got {}", positional.len());
+            return Ok(results::ExecutionResult::new(1));
+        }
+
+        let shell = context.shell;
+        let src = shell.absolute_path(std::path::Path::new(&positional[0]));
+        let dst = shell.absolute_path(std::path::Path::new(&positional[1]));
+
+        #[cfg(target_family = "wasm")]
+        {
+            // Read source content via VFS.
+            let content = match brush_core::wasm_open_file_for_read(&src) {
+                Ok(mut reader) => {
+                    let mut buf = Vec::new();
+                    if let Err(e) = std::io::Read::read_to_end(&mut reader, &mut buf) {
+                        let _ = writeln!(stderr, "mv: cannot read '{}': {e}", positional[0]);
+                        return Ok(results::ExecutionResult::new(1));
+                    }
+                    buf
+                }
+                Err(e) => {
+                    let _ = writeln!(stderr, "mv: cannot stat '{}': {e}", positional[0]);
+                    return Ok(results::ExecutionResult::new(1));
+                }
+            };
+
+            // Write to destination.
+            match brush_core::wasm_open_file(&dst, false, true, true, false) {
+                Ok(mut writer) => {
+                    if let Err(e) = std::io::Write::write_all(&mut writer, &content) {
+                        let _ = writeln!(stderr, "mv: cannot write '{}': {e}", positional[1]);
+                        return Ok(results::ExecutionResult::new(1));
+                    }
+                }
+                Err(e) => {
+                    let _ = writeln!(stderr, "mv: cannot create '{}': {e}", positional[1]);
+                    return Ok(results::ExecutionResult::new(1));
+                }
+            }
+
+            // Remove source.
+            brush_core::wasm_remove(&src);
+        }
+
+        #[cfg(not(target_family = "wasm"))]
+        {
+            if let Err(e) = std::fs::rename(&src, &dst) {
+                let _ = writeln!(stderr, "mv: cannot move '{}' to '{}': {e}", positional[0], positional[1]);
+                return Ok(results::ExecutionResult::new(1));
+            }
+        }
+
+        Ok(results::ExecutionResult::new(0))
+    }
+}
+
 /// `touch` — create empty files or update timestamps.
 pub struct TouchBuiltin;
 
@@ -805,6 +890,7 @@ pub fn uutils_builtins<SE: extensions::ShellExtensions>(
     m.insert("ls".into(), builtins::simple_builtin::<LsBuiltin, SE>());
     m.insert("mkdir".into(), builtins::simple_builtin::<MkdirBuiltin, SE>());
     m.insert("rm".into(), builtins::simple_builtin::<RmBuiltin, SE>());
+    m.insert("mv".into(), builtins::simple_builtin::<MvBuiltin, SE>());
     m.insert("touch".into(), builtins::simple_builtin::<TouchBuiltin, SE>());
     m.insert("tee".into(), builtins::simple_builtin::<TeeBuiltin, SE>());
     m.insert("basename".into(), builtins::simple_builtin::<BasenameBuiltin, SE>());

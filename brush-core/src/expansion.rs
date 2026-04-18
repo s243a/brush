@@ -1741,7 +1741,14 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
                 Expansion::from(self.shell.options().option_flags())
             }
             brush_parser::word::SpecialParameter::ProcessId => {
-                Expansion::from(std::process::id().to_string())
+                #[cfg(target_family = "wasm")]
+                {
+                    Expansion::from("1".to_string())
+                }
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    Expansion::from(std::process::id().to_string())
+                }
             }
             brush_parser::word::SpecialParameter::LastBackgroundProcessId => {
                 if let Some(job) = self.shell.jobs().current_job()
